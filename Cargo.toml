@@ -1,0 +1,18 @@
+[package]
+name = "tofu"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop", "xkbcommon"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+fuzzy-matcher = "0.3"
+fontdue = "0.9"
+nix = { version = "0.28", features = ["poll"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
