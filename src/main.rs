@@ -1,6 +1,6 @@
 use fuzzy_matcher::FuzzyMatcher;
+use serde::{Deserialize, Serialize};
 use smithay_client_toolkit::{
-    reexports::calloop,
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_registry,
     delegate_seat, delegate_shm,
@@ -41,6 +41,118 @@ fn parse_color(color_str: &str) -> u32 {
         }
     }
     0xff4488ff // Default blue
+}
+
+// Frecency data structures
+const MAX_LAUNCHES_PER_APP: usize = 20;
+const FRECENCY_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize, Default)]
+struct FrecencyData {
+    version: u32,
+    apps: HashMap<String, AppUsage>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct AppUsage {
+    launches: Vec<u64>,
+}
+
+fn get_frecency_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let data_dir = std::env::var("XDG_DATA_HOME")
+        .unwrap_or_else(|_| format!("{}/.local/share", home));
+    std::path::PathBuf::from(data_dir).join("tofu").join("frecency.json")
+}
+
+fn load_frecency() -> FrecencyData {
+    let path = get_frecency_path();
+    if let Ok(content) = fs::read_to_string(&path) {
+        if let Ok(data) = serde_json::from_str::<FrecencyData>(&content) {
+            return data;
+        }
+    }
+    FrecencyData {
+        version: FRECENCY_VERSION,
+        apps: HashMap::new(),
+    }
+}
+
+fn save_frecency(data: &FrecencyData) {
+    let path = get_frecency_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(data) {
+        let _ = fs::write(&path, json);
+    }
+}
+
+fn reset_frecency() -> bool {
+    let path = get_frecency_path();
+    if path.exists() {
+        fs::remove_file(&path).is_ok()
+    } else {
+        true
+    }
+}
+
+fn record_launch(app_name: &str) {
+    let mut data = load_frecency();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let usage = data.apps.entry(app_name.to_string()).or_insert(AppUsage {
+        launches: Vec::new(),
+    });
+    usage.launches.push(now);
+
+    // Trim old entries, keep only the most recent
+    if usage.launches.len() > MAX_LAUNCHES_PER_APP {
+        usage.launches.sort_unstable();
+        usage.launches.reverse();
+        usage.launches.truncate(MAX_LAUNCHES_PER_APP);
+    }
+
+    save_frecency(&data);
+}
+
+fn calculate_frecency(app_name: &str, frecency_data: &FrecencyData) -> i64 {
+    let usage = match frecency_data.apps.get(app_name) {
+        Some(u) => u,
+        None => return 0,
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let hour = 3600u64;
+    let day = 24 * hour;
+    let week = 7 * day;
+    let month = 30 * day;
+
+    let mut score: i64 = 0;
+    for &timestamp in &usage.launches {
+        let age = now.saturating_sub(timestamp);
+        let weight = if age < 4 * hour {
+            100
+        } else if age < day {
+            70
+        } else if age < week {
+            50
+        } else if age < month {
+            30
+        } else {
+            10
+        };
+        score += weight;
+    }
+
+    score
 }
 
 fn find_font_by_name(font_name: &str) -> Option<fontdue::Font> {
@@ -86,25 +198,46 @@ fn load_font(font_spec: Option<&str>) -> fontdue::Font {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    
+
     // Parse arguments
     let mut drun_mode = false;
     let mut accent_color = 0xff4488ff; // Default blue
     let mut font_spec: Option<String> = None;
     let mut invert_mode = false;
-    
+    let mut reset_frecency_flag = false;
+
     for arg in &args[1..] {
         if arg == "--drun" {
             drun_mode = true;
         } else if arg == "--invert" {
             invert_mode = true;
+        } else if arg == "--reset" {
+            reset_frecency_flag = true;
         } else if arg.starts_with("--color=") {
             accent_color = parse_color(&arg[8..]);
         } else if arg.starts_with("--font=") {
             font_spec = Some(arg[7..].to_string());
         }
     }
-    
+
+    // Handle --reset: clear frecency data and exit
+    if reset_frecency_flag {
+        if reset_frecency() {
+            println!("Frecency data reset successfully");
+            std::process::exit(0);
+        } else {
+            eprintln!("Failed to reset frecency data");
+            std::process::exit(1);
+        }
+    }
+
+    // Load frecency data for drun mode
+    let frecency_data = if drun_mode {
+        load_frecency()
+    } else {
+        FrecencyData::default()
+    };
+
     let apps = if drun_mode {
         get_desktop_apps()
     } else {
@@ -165,14 +298,12 @@ fn main() {
         accent_color,
         invert_mode,
         cursor_visible: true,
+        frecency_data,
+        drun_mode,
     };
     
     app.filter();
-    
-    // Set up a timer for cursor blinking
-    let timer = std::time::Duration::from_millis(500);
-    let mut last_blink = std::time::Instant::now();
-    
+
     while !app.exit {
         if app.needs_redraw && app.configured {
             app.draw();
@@ -372,6 +503,8 @@ struct App {
     accent_color: u32,
     invert_mode: bool,
     cursor_visible: bool,
+    frecency_data: FrecencyData,
+    drun_mode: bool,
 }
 
 impl App {
@@ -381,7 +514,17 @@ impl App {
             .items
             .iter()
             .filter_map(|item| {
-                matcher.fuzzy_match(&item.0, &self.query).map(|s| (s, item.clone()))
+                matcher.fuzzy_match(&item.0, &self.query).map(|fuzzy_score| {
+                    // Calculate frecency boost (only in drun mode)
+                    let frecency_score = if self.drun_mode {
+                        calculate_frecency(&item.0, &self.frecency_data)
+                    } else {
+                        0
+                    };
+                    // Combined score: frecency has significant weight but doesn't completely override fuzzy
+                    let combined_score = fuzzy_score + (frecency_score * 10);
+                    (combined_score, item.clone())
+                })
             })
             .collect();
         filtered.sort_by(|a, b| b.0.cmp(&a.0));
@@ -526,11 +669,7 @@ impl App {
         self.surface.damage_buffer(0, 0, output_width as i32, height as i32);
         self.surface.commit();
     }
-    
-    fn string_width(&self, text: &str) -> u32 {
-        self.string_width_scaled(text, FONT_SIZE)
-    }
-    
+
     fn string_width_scaled(&self, text: &str, font_size: f32) -> u32 {
         let mut width = 0u32;
         for c in text.chars() {
@@ -547,7 +686,12 @@ impl App {
             Keysym::Escape => self.exit = true,
             Keysym::Return => {
                 if let Some((_, item)) = self.filtered.get(self.selected) {
-                    launch_app(&item.1);
+                    let app_name = item.0.clone();
+                    let success = launch_app(&item.1);
+                    // Only record launch if spawn succeeded (app exists) and in drun mode
+                    if success && self.drun_mode {
+                        record_launch(&app_name);
+                    }
                 }
                 self.exit = true;
             }
@@ -579,12 +723,13 @@ impl App {
     }
 }
 
-fn launch_app(exec: &str) {
+fn launch_app(exec: &str) -> bool {
     if exec.starts_with("flatpak run") {
         let parts: Vec<_> = exec.split_whitespace().collect();
         if parts.len() >= 3 {
-            let _ = Command::new("flatpak").args(&parts[2..]).spawn();
+            return Command::new("flatpak").args(&parts[2..]).spawn().is_ok();
         }
+        false
     } else {
         let parts: Vec<_> = exec.split_whitespace().collect();
         if !parts.is_empty() {
@@ -592,8 +737,9 @@ fn launch_app(exec: &str) {
             if parts.len() > 1 {
                 cmd.args(&parts[1..]);
             }
-            let _ = cmd.spawn();
+            return cmd.spawn().is_ok();
         }
+        false
     }
 }
 
@@ -665,10 +811,6 @@ fn draw_rect_clipped(canvas: &mut [u8], width: u32, _height: u32, x: u32, y: u32
             }
         }
     }
-}
-
-fn draw_string_internal(canvas: &mut [u8], width: u32, x: u32, y: u32, text: &str, color: u32, font: &fontdue::Font) {
-    draw_string_internal_scaled(canvas, width, x, y, text, color, font, FONT_SIZE);
 }
 
 fn draw_string_internal_scaled(canvas: &mut [u8], width: u32, x: u32, y: u32, text: &str, color: u32, font: &fontdue::Font, font_size: f32) {

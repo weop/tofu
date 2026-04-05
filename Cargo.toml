@@ -11,6 +11,8 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 fuzzy-matcher = "0.3"
 fontdue = "0.9"
 nix = { version = "0.28", features = ["poll"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [profile.release]
 opt-level = 3

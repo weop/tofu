@@ -4,9 +4,10 @@ An ultra-minimalist application launcher for Wayland, inspired by [rofi](https:/
 
 ## Features
 
-- **Tiny**: ~750 lines of Rust, ~1MB binary
+- **Tiny**: ~1000 lines of Rust, ~1.1MB binary
 - **Fast**: Native Wayland layer-shell, no X11 overhead
 - **Fuzzy matching**: Skim's algorithm for fast filtering
+- **Frecency**: Learns your usage patterns (frequency + recency)
 - **Beautiful**: Fade-out results, rounded corners, customizable accent colors
 - **Flexible**: dmenu mode or .desktop app launcher
 
@@ -41,6 +42,7 @@ tofu --drun
 | `--color="#RRGGBB"` | Set accent color (cursor + selection) | `tofu --drun --color="#b42400"` |
 | `--font="PATTERN"` | Set font (fc-match pattern or path) | `tofu --drun --font="Geist Mono"` |
 | `--invert` | Inverted selection style (accent text, black bg) | `tofu --drun --invert` |
+| `--reset` | Reset frecency/priority data | `tofu --reset` |
 
 ### Examples
 
