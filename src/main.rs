@@ -900,7 +900,9 @@ impl SeatHandler for App {
 
 impl KeyboardHandler for App {
     fn enter(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _keyboard: &WlKeyboard, _surface: &WlSurface, _serial: u32, _raw: &[u32], _keysyms: &[Keysym]) {}
-    fn leave(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _keyboard: &WlKeyboard, _surface: &WlSurface, _serial: u32) {}
+    fn leave(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _keyboard: &WlKeyboard, _surface: &WlSurface, _serial: u32) {
+        self.exit = true;
+    }
     fn press_key(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _keyboard: &WlKeyboard, _serial: u32, event: KeyEvent) {
         // Handle text input for printable characters
         if let Some(text) = event.utf8.as_ref() {
