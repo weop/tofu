@@ -1,7 +1,7 @@
 use fuzzy_matcher::FuzzyMatcher;
 use serde::{Deserialize, Serialize};
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::{CompositorHandler, CompositorState, Region},
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_registry,
     delegate_seat, delegate_shm,
     output::{OutputHandler, OutputState},
@@ -25,7 +25,11 @@ use std::process::Command;
 use wayland_client::protocol::{
     wl_keyboard::WlKeyboard, wl_output::WlOutput, wl_seat::WlSeat, wl_surface::WlSurface,
 };
-use wayland_client::{Connection, QueueHandle};
+use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_protocols::ext::background_effect::v1::client::{
+    ext_background_effect_manager_v1::{self, ExtBackgroundEffectManagerV1},
+    ext_background_effect_surface_v1::{self, ExtBackgroundEffectSurfaceV1},
+};
 
 // Font settings
 const FONT_SIZE: f32 = 20.0;
@@ -205,12 +209,15 @@ fn main() {
     let mut font_spec: Option<String> = None;
     let mut invert_mode = false;
     let mut reset_frecency_flag = false;
+    let mut glass_mode = false;
 
     for arg in &args[1..] {
         if arg == "--drun" {
             drun_mode = true;
         } else if arg == "--invert" {
             invert_mode = true;
+        } else if arg == "--glass" {
+            glass_mode = true;
         } else if arg == "--reset" {
             reset_frecency_flag = true;
         } else if arg.starts_with("--color=") {
@@ -264,8 +271,23 @@ fn main() {
     let output_state = OutputState::new(&globals, &qh);
     let seat_state = SeatState::new(&globals, &qh);
 
+    // Background-effect (blur) manager - present on compositors like niri 26.04+.
+    // This lets us scope blur to just the rounded panel; a niri layer-rule alone would
+    // blur the entire (mostly transparent) full-width layer surface.
+    let bg_effect_mgr = globals
+        .bind::<ExtBackgroundEffectManagerV1, _, _>(&qh, 1..=1, ())
+        .ok();
+
     let surface = compositor.create_surface(&qh);
     let layer = layer_shell.create_layer_surface(&qh, surface.clone(), Layer::Top, Some("tofu"), None);
+
+    let bg_effect = if glass_mode {
+        bg_effect_mgr
+            .as_ref()
+            .map(|m| m.get_background_effect(&surface, &qh, ()))
+    } else {
+        None
+    };
     
     // Anchor to top of current output - compositor will place on output with keyboard focus
     layer.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
@@ -285,6 +307,11 @@ fn main() {
         pool,
         layer,
         surface,
+        compositor,
+        glass: glass_mode,
+        bg_effect,
+        blur_set: false,
+        blur_region: None,
         output_state,
         seat_state,
         keyboard: None,
@@ -490,6 +517,11 @@ struct App {
     #[allow(dead_code)]
     layer: LayerSurface,
     surface: WlSurface,
+    compositor: CompositorState,
+    glass: bool,
+    bg_effect: Option<ExtBackgroundEffectSurfaceV1>,
+    blur_set: bool,
+    blur_region: Option<Region>,
     output_state: OutputState,
     seat_state: SeatState,
     keyboard: Option<WlKeyboard>,
@@ -570,11 +602,15 @@ impl App {
         let container_left = margin_x;
         let container_right = margin_x + window_width;
         
-        draw_rounded_rect(&mut canvas, output_width, height, margin_x, query_y, window_width, total_height, corner_radius, 0xff000000);
-        
+        // Glass mode uses translucent (premultiplied) tints so the blurred desktop shows through.
+        let container_color = if self.glass { premultiply(0x80_0a0a0a) } else { 0xff000000 };
+        let input_color = if self.glass { premultiply(0x99_1a1a1a) } else { 0xff1a1a1a };
+
+        draw_rounded_rect(&mut canvas, output_width, height, margin_x, query_y, window_width, total_height, corner_radius, container_color);
+
         // Draw input box background (slightly lighter than main bg) with rounded corners
-        draw_rounded_rect(&mut canvas, output_width, height, margin_x + (8 * scale), query_y + (8 * scale), 
-                         window_width - (16 * scale), input_box_height - (16 * scale), corner_radius / 2, 0xff1a1a1a);
+        draw_rounded_rect(&mut canvas, output_width, height, margin_x + (8 * scale), query_y + (8 * scale),
+                         window_width - (16 * scale), input_box_height - (16 * scale), corner_radius / 2, input_color);
         
         // Calculate vertical center of input box for text
         let text_baseline = query_y + (input_box_height / 2) + (font_size as u32 / 3);
@@ -618,10 +654,10 @@ impl App {
                 continue;
             }
             
-            // Calculate fade opacity - always assume 10 results max for consistent fade
-            // Minimum opacity is 20% (0.2) so items never fully disappear
+            // Calculate fade - always assume 10 results max for consistent fade.
+            // Glass mode fades text opacity 100% -> ~5%; otherwise items darken toward black (min 20%).
             let fade = 1.0 - (i as f32 / max_results_for_fade).powf(0.7);
-            let fade = fade.clamp(0.2, 1.0);
+            let fade = if self.glass { fade.clamp(0.05, 1.0) } else { fade.clamp(0.2, 1.0) };
             
             if *is_selected {
                 if self.invert_mode {
@@ -650,21 +686,45 @@ impl App {
                 let bg_color = 0xff000000 | ((bg_r as u32) << 16) | ((bg_g as u32) << 8) | (bg_b as u32);
                 
                 if fade > 0.05 {
-                    draw_rect_clipped(&mut canvas, output_width, height, margin_x, draw_y, window_width, draw_height, 
-                                     container_left, container_top, container_right, container_bottom, bg_color);
-                    
-                    if y + (24 * scale) > results_top && y + (24 * scale) < results_bottom {
-                        let txt_r = (0xcc as f32 * fade) as u8;
-                        let txt_g = (0xcc as f32 * fade) as u8;
-                        let txt_b = (0xcc as f32 * fade) as u8;
-                        let text_color = 0xff000000 | ((txt_r as u32) << 16) | ((txt_g as u32) << 8) | (txt_b as u32);
-                        draw_string_internal_scaled(&mut canvas, output_width, margin_x + padding + (12 * scale), 
-                                                   y + (24 * scale), name, text_color, &self.font, font_size);
+                    let text_visible = y + (24 * scale) > results_top && y + (24 * scale) < results_bottom;
+                    if self.glass {
+                        // Glass: keep full-brightness text but fade its opacity, so lower items
+                        // become more see-through to the blur (rather than darkening to black).
+                        if text_visible {
+                            draw_string_faded(&mut canvas, output_width, margin_x + padding + (12 * scale),
+                                             y + (24 * scale), name, 0xcccccc, &self.font, font_size, fade);
+                        }
+                    } else {
+                        draw_rect_clipped(&mut canvas, output_width, height, margin_x, draw_y, window_width, draw_height,
+                                         container_left, container_top, container_right, container_bottom, bg_color);
+                        if text_visible {
+                            let txt_r = (0xcc as f32 * fade) as u8;
+                            let txt_g = (0xcc as f32 * fade) as u8;
+                            let txt_b = (0xcc as f32 * fade) as u8;
+                            let text_color = 0xff000000 | ((txt_r as u32) << 16) | ((txt_g as u32) << 8) | (txt_b as u32);
+                            draw_string_internal_scaled(&mut canvas, output_width, margin_x + padding + (12 * scale),
+                                                       y + (24 * scale), name, text_color, &self.font, font_size);
+                        }
                     }
                 }
             }
         }
         
+        // Scope blur to the rounded panel only (in surface-local logical coordinates).
+        // Without this, niri's blur would cover the entire full-width layer surface.
+        if self.glass && !self.blur_set {
+            if let Some(effect) = self.bg_effect.as_ref() {
+                if let Ok(region) = Region::new(&self.compositor) {
+                    let mx = (self.output_width.saturating_sub(WINDOW_WIDTH)) / 2;
+                    let total_logical = 50 + 10 + (10 * LINE_HEIGHT + 10);
+                    add_rounded_region(&region, mx as i32, PADDING as i32, WINDOW_WIDTH as i32, total_logical as i32, 12);
+                    effect.set_blur_region(Some(region.wl_region()));
+                    self.blur_region = Some(region);
+                    self.blur_set = true;
+                }
+            }
+        }
+
         buffer.attach_to(&self.surface).unwrap();
         self.surface.damage_buffer(0, 0, output_width as i32, height as i32);
         self.surface.commit();
@@ -740,6 +800,29 @@ fn launch_app(exec: &str) -> bool {
             return cmd.spawn().is_ok();
         }
         false
+    }
+}
+
+// Convert a straight-alpha 0xAARRGGBB color to premultiplied alpha, as required by
+// wl_shm Argb8888 buffers. Needed for the translucent glass tints.
+fn premultiply(color: u32) -> u32 {
+    let a = (color >> 24) & 0xff;
+    let r = ((color >> 16) & 0xff) * a / 255;
+    let g = ((color >> 8) & 0xff) * a / 255;
+    let b = (color & 0xff) * a / 255;
+    (a << 24) | (r << 16) | (g << 8) | b
+}
+
+// Build a rounded-rectangle blur region from horizontal spans (matching draw_rounded_rect's
+// corner arc) so the blur follows the panel's rounded corners instead of a hard rectangle.
+fn add_rounded_region(region: &Region, x: i32, y: i32, w: i32, h: i32, r: i32) {
+    region.add(x, y + r, w, h - 2 * r);
+    for i in 0..r {
+        let dy = r - i;
+        let inset = r - ((r * r - dy * dy) as f64).sqrt() as i32;
+        let rw = w - 2 * inset;
+        region.add(x + inset, y + i, rw, 1);
+        region.add(x + inset, y + h - 1 - i, rw, 1);
     }
 }
 
@@ -862,6 +945,53 @@ fn draw_string_internal_scaled(canvas: &mut [u8], width: u32, x: u32, y: u32, te
     }
 }
 
+// Like draw_string_internal_scaled, but composites the text over the (possibly translucent)
+// canvas with an extra `opacity` factor, using premultiplied-alpha source-over so the result
+// keeps partial transparency. Used in glass mode to fade list items in opacity.
+fn draw_string_faded(canvas: &mut [u8], width: u32, x: u32, y: u32, text: &str, color: u32, font: &fontdue::Font, font_size: f32, opacity: f32) {
+    let bytes = color.to_le_bytes();
+    let mut cx = x;
+
+    for c in text.chars() {
+        let (metrics, bitmap) = font.rasterize(c, font_size);
+
+        let glyph_width = metrics.width;
+        let glyph_height = metrics.height;
+        let baseline = y as i32 - metrics.ymin;
+
+        for gy in 0..glyph_height {
+            for gx in 0..glyph_width {
+                let bitmap_idx = gy * glyph_width + gx;
+                if bitmap_idx < bitmap.len() {
+                    let coverage = bitmap[bitmap_idx] as f32 / 255.0;
+                    if coverage > 0.0 {
+                        let px = cx + gx as u32;
+                        let py = baseline as u32 - glyph_height as u32 + gy as u32;
+
+                        if px < width && py < 5000 {
+                            let idx = ((py * width + px) * 4) as usize;
+                            if idx + 4 <= canvas.len() {
+                                let sa = coverage * opacity; // source alpha (0..1)
+                                let inv = 1.0 - sa;
+                                // Premultiplied source-over: out = src*sa + dst*(1-sa).
+                                for ch in 0..3 {
+                                    let src_pm = bytes[ch] as f32 * sa;
+                                    let dst = canvas[idx + ch] as f32;
+                                    canvas[idx + ch] = (src_pm + dst * inv) as u8;
+                                }
+                                let dst_a = canvas[idx + 3] as f32;
+                                canvas[idx + 3] = (255.0 * sa + dst_a * inv) as u8;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        cx += metrics.advance_width as u32;
+    }
+}
+
 impl CompositorHandler for App {
     fn scale_factor_changed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _surface: &WlSurface, factor: i32) {
         if factor > 0 {
@@ -944,6 +1074,14 @@ impl ShmHandler for App {
 impl ProvidesRegistryState for App {
     fn registry(&mut self) -> &mut RegistryState { &mut self.registry_state }
     registry_handlers!(OutputState, SeatState);
+}
+
+impl Dispatch<ExtBackgroundEffectManagerV1, ()> for App {
+    fn event(_: &mut Self, _: &ExtBackgroundEffectManagerV1, _: ext_background_effect_manager_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<ExtBackgroundEffectSurfaceV1, ()> for App {
+    fn event(_: &mut Self, _: &ExtBackgroundEffectSurfaceV1, _: ext_background_effect_surface_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
 
 delegate_compositor!(App);

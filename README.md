@@ -42,6 +42,7 @@ tofu --drun
 | `--color="#RRGGBB"` | Set accent color (cursor + selection) | `tofu --drun --color="#b42400"` |
 | `--font="PATTERN"` | Set font (fc-match pattern or path) | `tofu --drun --font="Geist Mono"` |
 | `--invert` | Inverted selection style (accent text, black bg) | `tofu --drun --invert` |
+| `--glass` | Translucent panel with background blur (frosted glass) | `tofu --drun --glass` |
 | `--reset` | Reset frecency/priority data | `tofu --reset` |
 
 ### Examples
@@ -58,6 +59,9 @@ tofu --drun --color="#009B67" --font="/usr/share/fonts/TTF/Hack-Regular.ttf"
 
 # Inverted mode (accent text color, black background for selected)
 tofu --drun --color="#b42400" --invert
+
+# Frosted glass: translucent panel that blurs the desktop behind it
+tofu --drun --glass
 
 # In Sway config
 set $menu tofu --drun --color="#4488ff" --font="Geist Mono"
@@ -89,6 +93,30 @@ binds {
 - **Two selection styles**:
   - Normal: Accent color background, white text
   - Inverted (`--invert`): Black background, accent color text
+- **Glass mode** (`--glass`): Renders the panel with a translucent tint and requests
+  background blur scoped to the rounded panel via the
+  [`ext-background-effect`](https://wayland.app/protocols/ext-background-effect-v1)
+  Wayland protocol. The compositor blurs whatever is behind the panel.
+
+  Requires a compositor that implements `ext-background-effect` (e.g. **niri 26.04+**).
+  No compositor config is needed — the app requests the blur itself, and scopes it to
+  the panel. (A niri `layer-rule` with `background-effect { blur true }` is *not* a
+  substitute: layer rules blur the entire full-width layer surface, transparent areas
+  included, so the protocol is what keeps the blur confined to the panel.) On
+  compositors without the protocol, the panel stays translucent and the blur is skipped.
+
+  For reference, the niri-specific `layer-rule` equivalent (blurs the whole layer
+  surface, not just the panel) looks like:
+
+  ```kdl
+  layer-rule {
+      match namespace="tofu"
+      background-effect {
+          blur true
+          xray false
+      }
+  }
+  ```
 
 ## Building from Source
 
