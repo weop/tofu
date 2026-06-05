@@ -12,7 +12,9 @@ use smithay_client_toolkit::{
         Capability, SeatHandler, SeatState,
     },
     shell::{
-        wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface},
+        wlr_layer::{
+            Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
+        },
         WaylandSurface,
     },
     shm::{slot::SlotPool, Shm, ShmHandler},
@@ -35,7 +37,10 @@ use wayland_protocols::ext::background_effect::v1::client::{
 const FONT_SIZE: f32 = 20.0;
 const LINE_HEIGHT: u32 = 36;
 const PADDING: u32 = 24;
-const WINDOW_WIDTH: u32 = 800; // Fixed width centered on screen
+const INPUT_BOX_HEIGHT: u32 = 64; // Taller box -> more vertical padding around the query text
+const TEXT_INSET: u32 = 24; // Horizontal inset (from panel edge) shared by query + result text
+const RESULTS_GAP: u32 = 4; // Vertical gap between the input box and the results list
+const WINDOW_WIDTH: u32 = 600; // Fixed width centered on screen
 
 fn parse_color(color_str: &str) -> u32 {
     let s = color_str.trim_start_matches('#');
@@ -64,9 +69,11 @@ struct AppUsage {
 
 fn get_frecency_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let data_dir = std::env::var("XDG_DATA_HOME")
-        .unwrap_or_else(|_| format!("{}/.local/share", home));
-    std::path::PathBuf::from(data_dir).join("tofu").join("frecency.json")
+    let data_dir =
+        std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home));
+    std::path::PathBuf::from(data_dir)
+        .join("tofu")
+        .join("frecency.json")
 }
 
 fn load_frecency() -> FrecencyData {
@@ -165,15 +172,18 @@ fn find_font_by_name(font_name: &str) -> Option<fontdue::Font> {
         .args(["-f", "%{file}", font_name])
         .output()
         .ok()?;
-    
+
     let path = String::from_utf8_lossy(&output.stdout);
     let path = path.trim();
-    
-    if path.is_empty() || path == "nil" || path.contains("dejavu") && font_name.to_lowercase().contains("geist") {
+
+    if path.is_empty()
+        || path == "nil"
+        || path.contains("dejavu") && font_name.to_lowercase().contains("geist")
+    {
         // fc-match returned default, try more specific search
         return None;
     }
-    
+
     let data = fs::read(path).ok()?;
     fontdue::Font::from_bytes(data, fontdue::FontSettings::default()).ok()
 }
@@ -184,19 +194,23 @@ fn load_font(font_spec: Option<&str>) -> fontdue::Font {
         if let Some(font) = find_font_by_name(spec) {
             return font;
         }
-        
+
         // Try parsing as direct path
         if Path::new(spec).exists() {
             if let Ok(data) = fs::read(spec) {
-                if let Ok(font) = fontdue::Font::from_bytes(data, fontdue::FontSettings::default()) {
+                if let Ok(font) = fontdue::Font::from_bytes(data, fontdue::FontSettings::default())
+                {
                     return font;
                 }
             }
         }
-        
-        eprintln!("Warning: Could not find font '{}', using system default", spec);
+
+        eprintln!(
+            "Warning: Could not find font '{}', using system default",
+            spec
+        );
     }
-    
+
     load_system_font()
 }
 
@@ -250,9 +264,13 @@ fn main() {
     } else {
         let mut input = String::new();
         io::stdin().read_to_string(&mut input).unwrap();
-        input.lines().map(|s| (s.to_string(), s.to_string(), None)).filter(|(n, _, _)| !n.is_empty()).collect()
+        input
+            .lines()
+            .map(|s| (s.to_string(), s.to_string(), None))
+            .filter(|(n, _, _)| !n.is_empty())
+            .collect()
     };
-    
+
     if apps.is_empty() {
         eprintln!("No items provided");
         std::process::exit(1);
@@ -264,7 +282,7 @@ fn main() {
     let conn = Connection::connect_to_env().unwrap();
     let (globals, mut event_queue) = wayland_client::globals::registry_queue_init(&conn).unwrap();
     let qh = event_queue.handle();
-    
+
     let compositor = CompositorState::bind(&globals, &qh).unwrap();
     let layer_shell = LayerShell::bind(&globals, &qh).unwrap();
     let shm = Shm::bind(&globals, &qh).unwrap();
@@ -279,7 +297,8 @@ fn main() {
         .ok();
 
     let surface = compositor.create_surface(&qh);
-    let layer = layer_shell.create_layer_surface(&qh, surface.clone(), Layer::Top, Some("tofu"), None);
+    let layer =
+        layer_shell.create_layer_surface(&qh, surface.clone(), Layer::Top, Some("tofu"), None);
 
     let bg_effect = if glass_mode {
         bg_effect_mgr
@@ -288,7 +307,7 @@ fn main() {
     } else {
         None
     };
-    
+
     // Anchor to top of current output - compositor will place on output with keyboard focus
     layer.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
     layer.set_size(0, 500); // 0 width = full width, we'll draw centered
@@ -297,7 +316,7 @@ fn main() {
     layer.commit();
 
     let pool = SlotPool::new(2560 * 500 * 4, &shm).unwrap();
-    
+
     let mut app = App {
         items: apps,
         filtered: Vec::new(),
@@ -328,7 +347,7 @@ fn main() {
         frecency_data,
         drun_mode,
     };
-    
+
     app.filter();
 
     while !app.exit {
@@ -336,7 +355,7 @@ fn main() {
             app.draw();
             app.needs_redraw = false;
         }
-        
+
         match event_queue.blocking_dispatch(&mut app) {
             Ok(_) => {}
             Err(e) => eprintln!("Wayland error: {}", e),
@@ -382,7 +401,7 @@ fn load_system_font() -> fontdue::Font {
         "/usr/share/fonts/truetype/jetbrains/JetBrainsMono-Regular.ttf",
         "/usr/share/fonts/jetbrains/JetBrainsMono-Regular.ttf",
     ];
-    
+
     for path in &font_paths {
         if let Ok(data) = fs::read(path) {
             if let Ok(font) = fontdue::Font::from_bytes(data, fontdue::FontSettings::default()) {
@@ -390,26 +409,30 @@ fn load_system_font() -> fontdue::Font {
             }
         }
     }
-    
+
     // Try to find any monospace font using fontconfig
-    if let Ok(output) = Command::new("fc-match").args(["-f", "%{file}", "monospace"]).output() {
+    if let Ok(output) = Command::new("fc-match")
+        .args(["-f", "%{file}", "monospace"])
+        .output()
+    {
         let path = String::from_utf8_lossy(&output.stdout);
         if !path.is_empty() && path != "nil" {
             if let Ok(data) = fs::read(path.trim()) {
-                if let Ok(font) = fontdue::Font::from_bytes(data, fontdue::FontSettings::default()) {
+                if let Ok(font) = fontdue::Font::from_bytes(data, fontdue::FontSettings::default())
+                {
                     return font;
                 }
             }
         }
     }
-    
+
     // Last resort: try any ttf/otf in common directories
     let font_dirs = [
         "/usr/share/fonts/truetype",
         "/usr/share/fonts/TTF",
         "/usr/share/fonts/opentype",
     ];
-    
+
     for dir in &font_dirs {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -417,7 +440,9 @@ fn load_system_font() -> fontdue::Font {
                 if let Some(ext) = path.extension() {
                     if ext == "ttf" || ext == "otf" {
                         if let Ok(data) = fs::read(&path) {
-                            if let Ok(font) = fontdue::Font::from_bytes(data, fontdue::FontSettings::default()) {
+                            if let Ok(font) =
+                                fontdue::Font::from_bytes(data, fontdue::FontSettings::default())
+                            {
                                 return font;
                             }
                         }
@@ -426,7 +451,7 @@ fn load_system_font() -> fontdue::Font {
             }
         }
     }
-    
+
     panic!("No usable font found on system");
 }
 
@@ -434,16 +459,22 @@ type AppEntry = (String, String, Option<String>);
 
 fn get_desktop_apps() -> Vec<AppEntry> {
     let mut apps = HashMap::new();
-    
-    let data_dirs = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| 
-        "/usr/local/share:/usr/share".to_string());
+
+    let data_dirs = std::env::var("XDG_DATA_DIRS")
+        .unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
     let home = std::env::var("HOME").unwrap_or_default();
-    
-    let mut paths: Vec<String> = data_dirs.split(':').map(|s| format!("{}/applications", s)).collect();
+
+    let mut paths: Vec<String> = data_dirs
+        .split(':')
+        .map(|s| format!("{}/applications", s))
+        .collect();
     paths.insert(0, format!("{}/.local/share/applications", home));
-    paths.push(format!("{}/.local/share/flatpak/exports/share/applications", home));
+    paths.push(format!(
+        "{}/.local/share/flatpak/exports/share/applications",
+        home
+    ));
     paths.push("/var/lib/flatpak/exports/share/applications".to_string());
-    
+
     for path in paths {
         if let Ok(entries) = fs::read_dir(&path) {
             for entry in entries.flatten() {
@@ -456,7 +487,7 @@ fn get_desktop_apps() -> Vec<AppEntry> {
             }
         }
     }
-    
+
     let mut result: Vec<_> = apps.into_values().collect();
     result.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
     result
@@ -464,13 +495,13 @@ fn get_desktop_apps() -> Vec<AppEntry> {
 
 fn parse_desktop_file(path: &Path) -> Option<AppEntry> {
     let content = fs::read_to_string(path).ok()?;
-    
+
     let mut name = None;
     let mut exec = None;
     let mut icon = None;
     let mut no_display = false;
     let mut in_entry = false;
-    
+
     for line in content.lines() {
         if line.starts_with("[Desktop Entry]") {
             in_entry = true;
@@ -488,22 +519,23 @@ fn parse_desktop_file(path: &Path) -> Option<AppEntry> {
             }
         }
     }
-    
+
     if no_display || name.is_none() || exec.is_none() {
         return None;
     }
-    
+
     let name = name.unwrap();
     let exec = exec.unwrap();
-    let exec = exec.split_whitespace()
+    let exec = exec
+        .split_whitespace()
         .filter(|s| !s.starts_with('%'))
         .collect::<Vec<_>>()
         .join(" ");
-    
+
     if exec.is_empty() {
         return None;
     }
-    
+
     Some((name, exec, icon))
 }
 
@@ -546,17 +578,19 @@ impl App {
             .items
             .iter()
             .filter_map(|item| {
-                matcher.fuzzy_match(&item.0, &self.query).map(|fuzzy_score| {
-                    // Calculate frecency boost (only in drun mode)
-                    let frecency_score = if self.drun_mode {
-                        calculate_frecency(&item.0, &self.frecency_data)
-                    } else {
-                        0
-                    };
-                    // Combined score: frecency has significant weight but doesn't completely override fuzzy
-                    let combined_score = fuzzy_score + (frecency_score * 10);
-                    (combined_score, item.clone())
-                })
+                matcher
+                    .fuzzy_match(&item.0, &self.query)
+                    .map(|fuzzy_score| {
+                        // Calculate frecency boost (only in drun mode)
+                        let frecency_score = if self.drun_mode {
+                            calculate_frecency(&item.0, &self.frecency_data)
+                        } else {
+                            0
+                        };
+                        // Combined score: frecency has significant weight but doesn't completely override fuzzy
+                        let combined_score = fuzzy_score + (frecency_score * 10);
+                        (combined_score, item.clone())
+                    })
             })
             .collect();
         filtered.sort_by(|a, b| b.0.cmp(&a.0));
@@ -564,183 +598,193 @@ impl App {
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
         self.needs_redraw = true;
     }
-    
+
     fn draw(&mut self) {
-        let scale = self.scale_factor.max(1) as u32;
-        
-        // Scaled dimensions
-        let height = 500u32 * scale;
-        let output_width = self.output_width * scale;
-        let window_width = WINDOW_WIDTH * scale;
-        let padding = PADDING * scale;
-        let line_height = LINE_HEIGHT * scale;
-        let input_box_height = 50u32 * scale;
-        let corner_radius = 12u32 * scale;
-        let font_size = FONT_SIZE * scale as f32;
-        
-        let margin_x = (output_width.saturating_sub(window_width)) / 2;
-        let stride = output_width * 4;
-        
-        // Pre-calculate string widths
-        let query_width = self.string_width_scaled(&self.query, font_size);
-        let cursor_x = margin_x + padding + (12 * scale) + query_width;
-        let cursor_char_width = self.string_width_scaled("m", font_size);
-        
-        let (buffer, mut canvas) = self.pool.create_buffer(output_width as i32, height as i32, stride as i32, wayland_client::protocol::wl_shm::Format::Argb8888).unwrap();
-        
-        // Clear background - transparent outside window area
-        for chunk in canvas.chunks_exact_mut(4) {
-            chunk.copy_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-        }
-        
-        // Draw main black background area (wraps input + results) with rounded corners
-        let query_y = PADDING * scale;
-        let results_height = (10u32 * line_height) + (10 * scale);
-        let total_height = input_box_height + (10 * scale) + results_height;
-        let container_top = query_y;
-        let container_bottom = query_y + total_height;
-        let container_left = margin_x;
-        let container_right = margin_x + window_width;
-        
-        // Glass mode uses translucent (premultiplied) tints so the blurred desktop shows through.
-        let container_color = if self.glass { premultiply(0x80_0a0a0a) } else { 0xff000000 };
-        let input_color = if self.glass { premultiply(0x99_1a1a1a) } else { 0xff1a1a1a };
+        let _t0 = std::time::Instant::now();
+        let glass = self.glass;
+        let sc = self.scale_factor.max(1) as u32; // device scale
+        let scale = sc as f32 * if glass { 1.5 } else { 1.0 }; // glass: 1.5x supersample
+        let px = |v: u32| (v as f32 * scale).round() as u32;
+        let fs = FONT_SIZE * scale;
 
-        draw_rounded_rect(&mut canvas, output_width, height, margin_x, query_y, window_width, total_height, corner_radius, container_color);
+        // Render (supersampled) vs device dimensions.
+        let (w, h) = (px(self.output_width), px(500));
+        let (dev_w, dev_h) = (self.output_width * sc, 500 * sc);
 
-        // Draw input box background (slightly lighter than main bg) with rounded corners
-        draw_rounded_rect(&mut canvas, output_width, height, margin_x + (8 * scale), query_y + (8 * scale),
-                         window_width - (16 * scale), input_box_height - (16 * scale), corner_radius / 2, input_color);
-        
-        // Calculate vertical center of input box for text
-        let text_baseline = query_y + (input_box_height / 2) + (font_size as u32 / 3);
-        
-        // Draw query text (vertically centered)
-        draw_string_internal_scaled(&mut canvas, output_width, margin_x + padding + (12 * scale), text_baseline, 
-                                   &self.query, 0xffffffff, &self.font, font_size);
-        
-        // Draw block cursor with accent color (blinking)
-        if self.cursor_visible {
-            draw_rect(&mut canvas, output_width, height, cursor_x, query_y + (12 * scale), cursor_char_width, 26 * scale, self.accent_color);
-        }
+        // Layout, in render pixels.
+        let win = px(WINDOW_WIDTH);
+        let mx = w.saturating_sub(win) / 2;
+        let tx = mx + px(TEXT_INSET); // shared text left edge (query + results)
+        let lh = px(LINE_HEIGHT);
+        let ibh = px(INPUT_BOX_HEIGHT);
+        let qy = px(PADDING);
+        let gap = px(RESULTS_GAP);
+        let total = ibh + gap + 10 * lh + px(10);
+        let cbot = qy + total;
+        let clip = (mx, qy, mx + win, cbot);
+        let cont = if glass {
+            premultiply(0x80_0a0a0a)
+        } else {
+            0xff000000
+        };
+        let inbox = if glass {
+            premultiply(0x99_1a1a1a)
+        } else {
+            0xff1a1a1a
+        };
+        let (accent, invert, cursor_on) =
+            (self.accent_color, self.invert_mode, self.cursor_visible);
 
-        // Collect item names first to avoid borrow issues
-        let item_names: Vec<(String, bool)> = self.filtered.iter().enumerate()
-            .map(|(i, (_, item))| (item.0.clone(), i == self.selected))
+        // Snapshot items + query so rendering borrows nothing else from self.
+        let query = self.query.clone();
+        let items: Vec<(String, bool)> = self
+            .filtered
+            .iter()
+            .enumerate()
+            .map(|(i, (_, it))| (it.0.clone(), i == self.selected))
             .collect();
-        
-        // Always assume 10 results for consistent fade calculation
-        let max_results_for_fade = 10.0;
-        
-        // Draw items (centered on current output) with fade out and clipping
-        let start_y = query_y + (70 * scale);
-        let results_top = query_y + input_box_height + (10 * scale);
-        let results_bottom = container_bottom - (10 * scale);
-        
-        for (i, (name, is_selected)) in item_names.iter().enumerate() {
-            let y = start_y + i as u32 * line_height;
-            let item_bottom = y + line_height - (4 * scale);
-            
-            // Skip if item is completely outside the container
-            if y >= results_bottom || item_bottom <= results_top {
-                continue;
+
+        let (buffer, mut dev) = self
+            .pool
+            .create_buffer(
+                dev_w as i32,
+                dev_h as i32,
+                (dev_w * 4) as i32,
+                wayland_client::protocol::wl_shm::Format::Argb8888,
+            )
+            .unwrap();
+        let mut render = vec![0u8; (w * h * 4) as usize];
+
+        {
+            let mut s = Surf {
+                buf: &mut render,
+                w,
+                h,
+                font: &self.font,
+                fs,
+            };
+            s.rrect(mx, qy, win, total, px(12), cont); // panel
+            s.rrect(
+                mx + px(8),
+                qy + px(8),
+                win - px(16),
+                ibh - px(16),
+                px(6),
+                inbox,
+            ); // input box
+            s.text(tx, qy + ibh / 2 + fs as u32 / 3, &query, 0xffffffff, 1.0);
+            if cursor_on {
+                let ch = px(26);
+                let cw = s.text_w("m");
+                let qw = s.text_w(&query);
+                s.rect(
+                    tx + qw,
+                    qy + ibh.saturating_sub(ch) / 2,
+                    cw,
+                    ch,
+                    clip,
+                    accent,
+                );
             }
-            
-            // Clip to container bounds
-            let draw_y = y.max(results_top);
-            let draw_bottom = item_bottom.min(results_bottom);
-            let draw_height = draw_bottom.saturating_sub(draw_y);
-            if draw_height == 0 {
-                continue;
-            }
-            
-            // Calculate fade - always assume 10 results max for consistent fade.
-            // Glass mode fades text opacity 100% -> ~5%; otherwise items darken toward black (min 20%).
-            let fade = 1.0 - (i as f32 / max_results_for_fade).powf(0.7);
-            let fade = if self.glass { fade.clamp(0.05, 1.0) } else { fade.clamp(0.2, 1.0) };
-            
-            if *is_selected {
-                if self.invert_mode {
-                    // Inverted mode: black background, accent color text
-                    let bg_color = 0xff000000u32;
-                    draw_rect_clipped(&mut canvas, output_width, height, margin_x, draw_y, window_width, draw_height, 
-                                     container_left, container_top, container_right, container_bottom, bg_color);
-                    if y + (24 * scale) > results_top && y + (24 * scale) < results_bottom {
-                        draw_string_internal_scaled(&mut canvas, output_width, margin_x + padding + (12 * scale), 
-                                                   y + (24 * scale), name, self.accent_color, &self.font, font_size);
-                    }
-                } else {
-                    // Normal mode: accent color background, white text
-                    draw_rect_clipped(&mut canvas, output_width, height, margin_x, draw_y, window_width, draw_height, 
-                                     container_left, container_top, container_right, container_bottom, self.accent_color);
-                    if y + (24 * scale) > results_top && y + (24 * scale) < results_bottom {
-                        draw_string_internal_scaled(&mut canvas, output_width, margin_x + padding + (12 * scale), 
-                                                   y + (24 * scale), name, 0xffffffff, &self.font, font_size);
-                    }
+            let rtop = qy + ibh + gap;
+            let rbot = cbot - px(10);
+            for (i, (name, sel)) in items.iter().enumerate() {
+                let y = rtop + px(4) + i as u32 * lh;
+                let ib = y + lh - px(4);
+                if y >= rbot || ib <= rtop {
+                    continue;
                 }
-            } else {
-                // Unselected items: fade by blending with black background
-                let bg_r = (0x20 as f32 * fade) as u8;
-                let bg_g = (0x20 as f32 * fade) as u8;
-                let bg_b = (0x20 as f32 * fade) as u8;
-                let bg_color = 0xff000000 | ((bg_r as u32) << 16) | ((bg_g as u32) << 8) | (bg_b as u32);
-                
-                if fade > 0.05 {
-                    let text_visible = y + (24 * scale) > results_top && y + (24 * scale) < results_bottom;
-                    if self.glass {
-                        // Glass: keep full-brightness text but fade its opacity, so lower items
-                        // become more see-through to the blur (rather than darkening to black).
-                        if text_visible {
-                            draw_string_faded(&mut canvas, output_width, margin_x + padding + (12 * scale),
-                                             y + (24 * scale), name, 0xcccccc, &self.font, font_size, fade);
+                let (dy, dh) = (y.max(rtop), ib.min(rbot).saturating_sub(y.max(rtop)));
+                if dh == 0 {
+                    continue;
+                }
+                let fade = 1.0 - (i as f32 / 10.0).powf(0.7);
+                let fade = if glass {
+                    fade.clamp(0.05, 1.0)
+                } else {
+                    fade.clamp(0.2, 1.0)
+                };
+                let ty = y + px(24);
+                let vis = ty > rtop && ty < rbot;
+                let (row, rw) = (mx + px(8), win - px(16));
+                if *sel {
+                    if glass {
+                        let c = if invert { accent } else { 0xffffffff };
+                        if vis {
+                            s.text(tx, ty, name, c, 1.0);
+                        }
+                    } else if invert {
+                        s.rect(row, dy, rw, dh, clip, 0xff000000);
+                        if vis {
+                            s.text(tx, ty, name, accent, 1.0);
                         }
                     } else {
-                        draw_rect_clipped(&mut canvas, output_width, height, margin_x, draw_y, window_width, draw_height,
-                                         container_left, container_top, container_right, container_bottom, bg_color);
-                        if text_visible {
-                            let txt_r = (0xcc as f32 * fade) as u8;
-                            let txt_g = (0xcc as f32 * fade) as u8;
-                            let txt_b = (0xcc as f32 * fade) as u8;
-                            let text_color = 0xff000000 | ((txt_r as u32) << 16) | ((txt_g as u32) << 8) | (txt_b as u32);
-                            draw_string_internal_scaled(&mut canvas, output_width, margin_x + padding + (12 * scale),
-                                                       y + (24 * scale), name, text_color, &self.font, font_size);
+                        s.rect(row, dy, rw, dh, clip, accent);
+                        if vis {
+                            s.text(tx, ty, name, 0xffffffff, 1.0);
+                        }
+                    }
+                } else if fade > 0.05 {
+                    if glass {
+                        if vis {
+                            s.text(tx, ty, name, 0xcccccc, fade);
+                        }
+                    } else {
+                        let g = (0x20 as f32 * fade) as u32;
+                        s.rect(row, dy, rw, dh, clip, 0xff000000 | g << 16 | g << 8 | g);
+                        if vis {
+                            let v = (0xcc as f32 * fade) as u32;
+                            s.text(tx, ty, name, 0xff000000 | v << 16 | v << 8 | v, 1.0);
                         }
                     }
                 }
             }
         }
-        
-        // Scope blur to the rounded panel only (in surface-local logical coordinates).
-        // Without this, niri's blur would cover the entire full-width layer surface.
-        if self.glass && !self.blur_set {
-            if let Some(effect) = self.bg_effect.as_ref() {
-                if let Ok(region) = Region::new(&self.compositor) {
-                    let mx = (self.output_width.saturating_sub(WINDOW_WIDTH)) / 2;
-                    let total_logical = 50 + 10 + (10 * LINE_HEIGHT + 10);
-                    add_rounded_region(&region, mx as i32, PADDING as i32, WINDOW_WIDTH as i32, total_logical as i32, 12);
-                    effect.set_blur_region(Some(region.wl_region()));
-                    self.blur_region = Some(region);
+
+        // Scope the blur to the rounded panel only (logical surface coords).
+        if glass && !self.blur_set {
+            if let Some(eff) = self.bg_effect.as_ref() {
+                if let Ok(reg) = Region::new(&self.compositor) {
+                    let lmx = self.output_width.saturating_sub(WINDOW_WIDTH) / 2;
+                    let tl = INPUT_BOX_HEIGHT + RESULTS_GAP + (10 * LINE_HEIGHT + 10);
+                    add_rounded_region(
+                        &reg,
+                        lmx as i32,
+                        PADDING as i32,
+                        WINDOW_WIDTH as i32,
+                        tl as i32,
+                        12,
+                    );
+                    eff.set_blur_region(Some(reg.wl_region()));
+                    self.blur_region = Some(reg);
                     self.blur_set = true;
                 }
             }
         }
 
+        // Only the centered panel has content; resample just its device-space bounding box.
+        let m = 4 * sc;
+        let bx = self.output_width.saturating_sub(WINDOW_WIDTH) / 2 * sc;
+        let ph = (INPUT_BOX_HEIGHT + RESULTS_GAP + 10 * LINE_HEIGHT + 10) * sc;
+        let rect = (
+            bx.saturating_sub(m),
+            (PADDING * sc).saturating_sub(m),
+            bx + WINDOW_WIDTH * sc + m,
+            PADDING * sc + ph + m,
+        );
+        resample(&render, &mut dev, w, h, dev_w, dev_h, rect);
+        eprintln!(
+            "BENCH glass={} render={}x{} us={}",
+            glass,
+            w,
+            h,
+            _t0.elapsed().as_micros()
+        );
         buffer.attach_to(&self.surface).unwrap();
-        self.surface.damage_buffer(0, 0, output_width as i32, height as i32);
+        self.surface.damage_buffer(0, 0, dev_w as i32, dev_h as i32);
         self.surface.commit();
     }
 
-    fn string_width_scaled(&self, text: &str, font_size: f32) -> u32 {
-        let mut width = 0u32;
-        for c in text.chars() {
-            let (metrics, _) = self.font.rasterize(c, font_size);
-            width += metrics.advance_width as u32;
-        }
-        width
-    }
-    
-
-    
     fn handle_key(&mut self, keysym: Keysym) {
         match keysym {
             Keysym::Escape => self.exit = true,
@@ -776,7 +820,7 @@ impl App {
             _ => {}
         }
     }
-    
+
     fn handle_text(&mut self, text: &str) {
         self.query.push_str(text);
         self.filter();
@@ -803,8 +847,41 @@ fn launch_app(exec: &str) -> bool {
     }
 }
 
-// Convert a straight-alpha 0xAARRGGBB color to premultiplied alpha, as required by
-// wl_shm Argb8888 buffers. Needed for the translucent glass tints.
+// Resolve the supersampled render buffer into the device buffer. Identity-copies when sizes
+// match (non-glass); otherwise averages a 2x2 supersample block per device pixel (cheap
+// integer math) which antialiases the glass 1.5x frame without per-pixel float weighting.
+fn resample(
+    src: &[u8],
+    dst: &mut [u8],
+    sw: u32,
+    sh: u32,
+    dw: u32,
+    dh: u32,
+    rect: (u32, u32, u32, u32),
+) {
+    if sw == dw && sh == dh {
+        dst.copy_from_slice(src);
+        return;
+    }
+    dst.fill(0); // everything outside the panel rect is transparent
+    let (x0, y0, x1, y1) = rect;
+    for dy in y0..y1.min(dh) {
+        let (sy, sy1) = (dy * sh / dh, (dy * sh / dh + 1).min(sh - 1));
+        for dx in x0..x1.min(dw) {
+            let (sx, sx1) = (dx * sw / dw, (dx * sw / dw + 1).min(sw - 1));
+            let o = ((dy * dw + dx) * 4) as usize;
+            for c in 0..4 {
+                let s = src[((sy * sw + sx) * 4) as usize + c] as u32
+                    + src[((sy * sw + sx1) * 4) as usize + c] as u32
+                    + src[((sy1 * sw + sx) * 4) as usize + c] as u32
+                    + src[((sy1 * sw + sx1) * 4) as usize + c] as u32;
+                dst[o + c] = (s / 4) as u8;
+            }
+        }
+    }
+}
+
+// Convert a straight-alpha 0xAARRGGBB color to premultiplied alpha (wl_shm Argb8888).
 fn premultiply(color: u32) -> u32 {
     let a = (color >> 24) & 0xff;
     let r = ((color >> 16) & 0xff) * a / 255;
@@ -826,201 +903,184 @@ fn add_rounded_region(region: &Region, x: i32, y: i32, w: i32, h: i32, r: i32) {
     }
 }
 
-fn draw_rect(canvas: &mut [u8], width: u32, _height: u32, x: u32, y: u32, w: u32, h: u32, color: u32) {
-    let bytes = color.to_le_bytes();
-    for row in y..(y + h).min(500) {
-        for col in x..(x + w).min(width) {
-            let idx = ((row * width + col) * 4) as usize;
-            if idx + 4 <= canvas.len() {
-                canvas[idx..idx+4].copy_from_slice(&bytes);
-            }
-        }
-    }
+// A draw target: a pixel buffer (premultiplied Argb8888) plus the font for glyph rasterization.
+struct Surf<'a> {
+    buf: &'a mut [u8],
+    w: u32,
+    h: u32,
+    font: &'a fontdue::Font,
+    fs: f32,
 }
 
-fn draw_rounded_rect(canvas: &mut [u8], width: u32, height: u32, x: u32, y: u32, w: u32, h: u32, radius: u32, color: u32) {
-    let bytes = color.to_le_bytes();
-    
-    for row in y..(y + h).min(height) {
-        for col in x..(x + w).min(width) {
-            // Check if pixel is inside rounded corners
-            let dx = if col < x + radius {
-                radius - (col - x)
-            } else if col >= x + w - radius {
-                radius - (x + w - 1 - col)
-            } else {
-                0
-            };
-            
-            let dy = if row < y + radius {
-                radius - (row - y)
-            } else if row >= y + h - radius {
-                radius - (y + h - 1 - row)
-            } else {
-                0
-            };
-            
-            // If in a corner region, check if inside the rounded arc
-            let in_corner = dx > 0 && dy > 0;
-            let draw_pixel = if in_corner {
-                // Simple approximation: check if within radius
-                (dx * dx + dy * dy) <= (radius * radius)
-            } else {
-                true
-            };
-            
-            if draw_pixel {
-                let idx = ((row * width + col) * 4) as usize;
-                if idx + 4 <= canvas.len() {
-                    canvas[idx..idx+4].copy_from_slice(&bytes);
+impl Surf<'_> {
+    // Filled rect (overwrite), clipped to (left, top, right, bottom).
+    fn rect(&mut self, x: u32, y: u32, w: u32, h: u32, clip: (u32, u32, u32, u32), color: u32) {
+        let b = color.to_le_bytes();
+        for row in y.max(clip.1)..(y + h).min(clip.3).min(self.h) {
+            for col in x.max(clip.0)..(x + w).min(clip.2).min(self.w) {
+                let i = ((row * self.w + col) * 4) as usize;
+                if i + 4 <= self.buf.len() {
+                    self.buf[i..i + 4].copy_from_slice(&b);
                 }
             }
         }
     }
-}
 
-fn draw_rect_clipped(canvas: &mut [u8], width: u32, _height: u32, x: u32, y: u32, w: u32, h: u32, clip_left: u32, clip_top: u32, clip_right: u32, clip_bottom: u32, color: u32) {
-    let bytes = color.to_le_bytes();
-    let start_x = x.max(clip_left);
-    let end_x = (x + w).min(clip_right);
-    let start_y = y.max(clip_top);
-    let end_y = (y + h).min(clip_bottom);
-    
-    for row in start_y..end_y.min(500) {
-        for col in start_x..end_x.min(width) {
-            let idx = ((row * width + col) * 4) as usize;
-            if idx + 4 <= canvas.len() {
-                canvas[idx..idx+4].copy_from_slice(&bytes);
-            }
-        }
-    }
-}
-
-fn draw_string_internal_scaled(canvas: &mut [u8], width: u32, x: u32, y: u32, text: &str, color: u32, font: &fontdue::Font, font_size: f32) {
-    let bytes = color.to_le_bytes();
-    let mut cx = x;
-    
-    for c in text.chars() {
-        let (metrics, bitmap) = font.rasterize(c, font_size);
-        
-        let glyph_width = metrics.width;
-        let glyph_height = metrics.height;
-        let baseline = y as i32 - metrics.ymin;
-        
-        for gy in 0..glyph_height {
-            for gx in 0..glyph_width {
-                let bitmap_idx = gy * glyph_width + gx;
-                if bitmap_idx < bitmap.len() {
-                    let alpha = bitmap[bitmap_idx] as u32;
-                    if alpha > 0 {
-                        let px = cx + gx as u32;
-                        let py = baseline as u32 - glyph_height as u32 + gy as u32;
-                        
-                        if px < width && py < 5000 { // Large enough for scaled height
-                            let idx = ((py * width + px) * 4) as usize;
-                            if idx + 4 <= canvas.len() {
-                                // Alpha blend
-                                let fg_r = bytes[0] as u32;
-                                let fg_g = bytes[1] as u32;
-                                let fg_b = bytes[2] as u32;
-                                let bg_r = canvas[idx] as u32;
-                                let bg_g = canvas[idx + 1] as u32;
-                                let bg_b = canvas[idx + 2] as u32;
-                                
-                                let a = alpha;
-                                let inv_a = 255 - alpha;
-                                
-                                canvas[idx] = ((fg_r * a + bg_r * inv_a) / 255) as u8;
-                                canvas[idx + 1] = ((fg_g * a + bg_g * inv_a) / 255) as u8;
-                                canvas[idx + 2] = ((fg_b * a + bg_b * inv_a) / 255) as u8;
-                                canvas[idx + 3] = 0xff;
-                            }
-                        }
+    // Rounded rect: interior overwrites; corner arcs composite for antialiased edges (fix 2).
+    fn rrect(&mut self, x: u32, y: u32, w: u32, h: u32, rad: u32, color: u32) {
+        let b = color.to_le_bytes();
+        for row in y..(y + h).min(self.h) {
+            let cy = rad > 0 && (row < y + rad || row >= y + h - rad);
+            for col in x..(x + w).min(self.w) {
+                let i = ((row * self.w + col) * 4) as usize;
+                if i + 4 > self.buf.len() {
+                    continue;
+                }
+                let cx = rad > 0 && (col < x + rad || col >= x + w - rad);
+                let cov = if cx && cy {
+                    let (pc, pr) = (col as f32 + 0.5, row as f32 + 0.5);
+                    let nx = pc.clamp((x + rad) as f32, (x + w - rad) as f32);
+                    let ny = pr.clamp((y + rad) as f32, (y + h - rad) as f32);
+                    (rad as f32 + 0.5 - ((pc - nx).powi(2) + (pr - ny).powi(2)).sqrt())
+                        .clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                if cov >= 1.0 {
+                    self.buf[i..i + 4].copy_from_slice(&b);
+                } else if cov > 0.0 {
+                    let sa = b[3] as f32 * cov / 255.0;
+                    for c in 0..4 {
+                        self.buf[i + c] =
+                            (b[c] as f32 * cov + self.buf[i + c] as f32 * (1.0 - sa)) as u8;
                     }
                 }
             }
         }
-        
-        cx += metrics.advance_width as u32;
     }
-}
 
-// Like draw_string_internal_scaled, but composites the text over the (possibly translucent)
-// canvas with an extra `opacity` factor, using premultiplied-alpha source-over so the result
-// keeps partial transparency. Used in glass mode to fade list items in opacity.
-fn draw_string_faded(canvas: &mut [u8], width: u32, x: u32, y: u32, text: &str, color: u32, font: &fontdue::Font, font_size: f32, opacity: f32) {
-    let bytes = color.to_le_bytes();
-    let mut cx = x;
+    fn text_w(&self, s: &str) -> u32 {
+        s.chars()
+            .map(|c| self.font.rasterize(c, self.fs).0.advance_width as u32)
+            .sum()
+    }
 
-    for c in text.chars() {
-        let (metrics, bitmap) = font.rasterize(c, font_size);
-
-        let glyph_width = metrics.width;
-        let glyph_height = metrics.height;
-        let baseline = y as i32 - metrics.ymin;
-
-        for gy in 0..glyph_height {
-            for gx in 0..glyph_width {
-                let bitmap_idx = gy * glyph_width + gx;
-                if bitmap_idx < bitmap.len() {
-                    let coverage = bitmap[bitmap_idx] as f32 / 255.0;
-                    if coverage > 0.0 {
-                        let px = cx + gx as u32;
-                        let py = baseline as u32 - glyph_height as u32 + gy as u32;
-
-                        if px < width && py < 5000 {
-                            let idx = ((py * width + px) * 4) as usize;
-                            if idx + 4 <= canvas.len() {
-                                let sa = coverage * opacity; // source alpha (0..1)
-                                let inv = 1.0 - sa;
-                                // Premultiplied source-over: out = src*sa + dst*(1-sa).
-                                for ch in 0..3 {
-                                    let src_pm = bytes[ch] as f32 * sa;
-                                    let dst = canvas[idx + ch] as f32;
-                                    canvas[idx + ch] = (src_pm + dst * inv) as u8;
-                                }
-                                let dst_a = canvas[idx + 3] as f32;
-                                canvas[idx + 3] = (255.0 * sa + dst_a * inv) as u8;
-                            }
-                        }
+    // Text via premultiplied source-over with an opacity factor.
+    fn text(&mut self, x: u32, y: u32, s: &str, color: u32, op: f32) {
+        let col = color.to_le_bytes();
+        let mut cx = x;
+        for c in s.chars() {
+            let (m, bmp) = self.font.rasterize(c, self.fs);
+            let (gw, gh, base, adv) =
+                (m.width, m.height, y as i32 - m.ymin, m.advance_width as u32);
+            for gy in 0..gh {
+                let py = base - gh as i32 + gy as i32;
+                if py < 0 || py as u32 >= self.h {
+                    continue;
+                }
+                for gx in 0..gw {
+                    let a = bmp[gy * gw + gx] as f32 / 255.0;
+                    let pxp = cx + gx as u32;
+                    if a == 0.0 || pxp >= self.w {
+                        continue;
                     }
+                    let i = ((py as u32 * self.w + pxp) * 4) as usize;
+                    if i + 4 > self.buf.len() {
+                        continue;
+                    }
+                    let (sa, inv) = (a * op, 1.0 - a * op);
+                    for ch in 0..3 {
+                        self.buf[i + ch] =
+                            (col[ch] as f32 * sa + self.buf[i + ch] as f32 * inv) as u8;
+                    }
+                    self.buf[i + 3] = (255.0 * sa + self.buf[i + 3] as f32 * inv) as u8;
                 }
             }
+            cx += adv;
         }
-
-        cx += metrics.advance_width as u32;
     }
 }
 
 impl CompositorHandler for App {
-    fn scale_factor_changed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _surface: &WlSurface, factor: i32) {
+    fn scale_factor_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &WlSurface,
+        factor: i32,
+    ) {
         if factor > 0 {
             self.scale_factor = factor;
             self.needs_redraw = true;
         }
     }
-    fn frame(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _surface: &WlSurface, _time: u32) {}
-    fn transform_changed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _surface: &WlSurface, _transform: wayland_client::protocol::wl_output::Transform) {}
-    fn surface_enter(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _surface: &WlSurface, _output: &WlOutput) {}
-    fn surface_leave(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _surface: &WlSurface, _output: &WlOutput) {}
+    fn frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &WlSurface,
+        _time: u32,
+    ) {
+    }
+    fn transform_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &WlSurface,
+        _transform: wayland_client::protocol::wl_output::Transform,
+    ) {
+    }
+    fn surface_enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &WlSurface,
+        _output: &WlOutput,
+    ) {
+    }
+    fn surface_leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &WlSurface,
+        _output: &WlOutput,
+    ) {
+    }
 }
 
 impl OutputHandler for App {
-    fn output_state(&mut self) -> &mut OutputState { &mut self.output_state }
+    fn output_state(&mut self) -> &mut OutputState {
+        &mut self.output_state
+    }
     fn new_output(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: WlOutput) {}
     fn update_output(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: WlOutput) {}
-    fn output_destroyed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: WlOutput) {}
+    fn output_destroyed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: WlOutput) {
+    }
 }
 
 impl SeatHandler for App {
-    fn seat_state(&mut self) -> &mut SeatState { &mut self.seat_state }
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seat_state
+    }
     fn new_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: WlSeat) {}
-    fn new_capability(&mut self, _conn: &Connection, qh: &QueueHandle<Self>, seat: WlSeat, cap: Capability) {
+    fn new_capability(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: WlSeat,
+        cap: Capability,
+    ) {
         if cap == Capability::Keyboard && self.keyboard.is_none() {
             self.keyboard = Some(self.seat_state.get_keyboard(qh, &seat, None).unwrap());
         }
     }
-    fn remove_capability(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: WlSeat, cap: Capability) {
+    fn remove_capability(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _seat: WlSeat,
+        cap: Capability,
+    ) {
         if cap == Capability::Keyboard && self.keyboard.is_some() {
             self.keyboard = None;
         }
@@ -1029,11 +1089,35 @@ impl SeatHandler for App {
 }
 
 impl KeyboardHandler for App {
-    fn enter(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _keyboard: &WlKeyboard, _surface: &WlSurface, _serial: u32, _raw: &[u32], _keysyms: &[Keysym]) {}
-    fn leave(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _keyboard: &WlKeyboard, _surface: &WlSurface, _serial: u32) {
+    fn enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &WlKeyboard,
+        _surface: &WlSurface,
+        _serial: u32,
+        _raw: &[u32],
+        _keysyms: &[Keysym],
+    ) {
+    }
+    fn leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &WlKeyboard,
+        _surface: &WlSurface,
+        _serial: u32,
+    ) {
         self.exit = true;
     }
-    fn press_key(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _keyboard: &WlKeyboard, _serial: u32, event: KeyEvent) {
+    fn press_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &WlKeyboard,
+        _serial: u32,
+        event: KeyEvent,
+    ) {
         // Handle text input for printable characters
         if let Some(text) = event.utf8.as_ref() {
             if !text.is_empty() && !text.chars().next().map_or(false, |c| c.is_control()) {
@@ -1043,45 +1127,89 @@ impl KeyboardHandler for App {
         }
         self.handle_key(event.keysym);
     }
-    fn release_key(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _keyboard: &WlKeyboard, _serial: u32, _event: KeyEvent) {}
-    fn update_modifiers(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _keyboard: &WlKeyboard, _serial: u32, _modifiers: Modifiers, _layout: u32) {}
+    fn release_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &WlKeyboard,
+        _serial: u32,
+        _event: KeyEvent,
+    ) {
+    }
+    fn update_modifiers(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &WlKeyboard,
+        _serial: u32,
+        _modifiers: Modifiers,
+        _layout: u32,
+    ) {
+    }
 }
 
 impl LayerShellHandler for App {
     fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
         self.exit = true;
     }
-    fn configure(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface, configure: smithay_client_toolkit::shell::wlr_layer::LayerSurfaceConfigure, _serial: u32) {
+    fn configure(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _layer: &LayerSurface,
+        configure: smithay_client_toolkit::shell::wlr_layer::LayerSurfaceConfigure,
+        _serial: u32,
+    ) {
         // Update output width from configure event (this is in surface coordinates)
         if configure.new_size.0 > 0 {
             self.output_width = configure.new_size.0 as u32;
         }
-        
+
         // Set the buffer scale to match output scale for HiDPI
         if self.scale_factor > 1 {
             self.surface.set_buffer_scale(self.scale_factor);
         }
-        
+
         self.configured = true;
         self.needs_redraw = true;
     }
 }
 
 impl ShmHandler for App {
-    fn shm_state(&mut self) -> &mut Shm { &mut self.shm }
+    fn shm_state(&mut self) -> &mut Shm {
+        &mut self.shm
+    }
 }
 
 impl ProvidesRegistryState for App {
-    fn registry(&mut self) -> &mut RegistryState { &mut self.registry_state }
+    fn registry(&mut self) -> &mut RegistryState {
+        &mut self.registry_state
+    }
     registry_handlers!(OutputState, SeatState);
 }
 
 impl Dispatch<ExtBackgroundEffectManagerV1, ()> for App {
-    fn event(_: &mut Self, _: &ExtBackgroundEffectManagerV1, _: ext_background_effect_manager_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+    fn event(
+        _: &mut Self,
+        _: &ExtBackgroundEffectManagerV1,
+        _: ext_background_effect_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
 }
 
 impl Dispatch<ExtBackgroundEffectSurfaceV1, ()> for App {
-    fn event(_: &mut Self, _: &ExtBackgroundEffectSurfaceV1, _: ext_background_effect_surface_v1::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+    fn event(
+        _: &mut Self,
+        _: &ExtBackgroundEffectSurfaceV1,
+        _: ext_background_effect_surface_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
 }
 
 delegate_compositor!(App);
